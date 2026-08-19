@@ -1,0 +1,215 @@
+name: Verify and apply PR 107 review fixes
+
+on:
+  push:
+    branches:
+      - agent/anydoc-pr107-final-fixes
+
+permissions:
+  contents: write
+
+concurrency:
+  group: agent-anydoc-pr107-final-fixes
+  cancel-in-progress: true
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Apply review fixes and regression tests
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path: Path, old: str, new: str) -> None:
+              text = path.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"{path}: expected exactly one match, found {count}\n"
+                      f"--- needle ---\n{old}"
+                  )
+              path.write_text(text.replace(old, new, 1))
+
+          rtf = Path("src/formats/rtf/mod.rs")
+
+          replace_once(
+              rtf,
+              r'''            if let Some(error) = self.materialization_error.take() {
+                return Err(error);
+            }
+        }
+        if !self.stack.is_empty() {''',
+              r'''            self.check_materialization_error()?;
+        }
+        if !self.stack.is_empty() {''',
+          )
+
+          replace_once(
+              rtf,
+              r'''        self.flush_pending();
+        if let Some(error) = self.materialization_error.take() {
+            return Err(error);
+        }
+        self.end_paragraph()''',
+              r'''        self.flush_pending();
+        self.check_materialization_error()?;
+        self.end_paragraph()''',
+          )
+
+          replace_once(
+              rtf,
+              r'''    fn flush_pending(&mut self) {
+        let encoding = self.state.font.and_then(|f| self.prelude.fonts.get(&f).copied());
+        if let Some(text) = self.decoder.take_pending(encoding) {
+            self.push_text(text);
+        }
+    }
+
+    fn push_text(&mut self, text: String) {''',
+              r'''    fn flush_pending(&mut self) {
+        let encoding = self.state.font.and_then(|f| self.prelude.fonts.get(&f).copied());
+        if let Some(text) = self.decoder.take_pending(encoding) {
+            self.push_text(text);
+        }
+    }
+
+    fn check_materialization_error(&mut self) -> Result<(), ConvertError> {
+        if let Some(error) = self.materialization_error.take() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn push_text(&mut self, text: String) {''',
+          )
+
+          replace_once(
+              rtf,
+              r'''    fn end_paragraph(&mut self) -> Result<(), ConvertError> {
+        let inlines = std::mem::take(&mut self.inlines);''',
+              r'''    fn end_paragraph(&mut self) -> Result<(), ConvertError> {
+        self.check_materialization_error()?;
+        let inlines = std::mem::take(&mut self.inlines);''',
+          )
+
+          replace_once(
+              rtf,
+              r'''                let text =
+                    format!("{} ", label.clone().unwrap_or_else(|| key.marker.label(*number)));
+                self.budget.charge_text(text.len())?;
+                self.budget.charge_text_run()?;''',
+              r'''                let text =
+                    format!("{} ", label.clone().unwrap_or_else(|| key.marker.label(*number)));
+                self.check_materialization_error()?;
+                self.budget.charge_text(text.len())?;
+                self.budget.charge_text_run()?;''',
+          )
+
+          replace_once(
+              rtf,
+              r'''        if let Some((key, level, number, label)) = entry {
+            self.list_run.push(ListEntry {''',
+              r'''        if let Some((key, level, number, label)) = entry {
+            if key.marker.ordered()
+                && let Some(label) = label.as_ref()
+            {
+                self.check_materialization_error()?;
+                self.budget.charge_text(label.len())?;
+                self.budget.charge_text_run()?;
+            }
+            self.list_run.push(ListEntry {''',
+          )
+
+          replace_once(
+              rtf,
+              r'''    fn end_cell(&mut self, depth: usize) -> Result<(), ConvertError> {
+        self.budget.charge_cell()?;''',
+              r'''    fn end_cell(&mut self, depth: usize) -> Result<(), ConvertError> {
+        self.check_materialization_error()?;
+        self.budget.charge_cell()?;''',
+          )
+
+          replace_once(
+              rtf,
+              r'''    #[test]
+    fn rtf_cell_materialization_is_bounded() {
+        let budget = MaterializationBudget::with_limits(1024, 1024, 1, 10);
+        let error =
+            parse_with_budget(br"{\rtf1\trowd\cellx1000\cellx2000 a\cell b\cell\row}", budget)
+                .unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_cells");
+    }
+}''',
+              r'''    #[test]
+    fn rtf_cell_materialization_is_bounded() {
+        let budget = MaterializationBudget::with_limits(1024, 1024, 1, 10);
+        let error =
+            parse_with_budget(br"{\rtf1\trowd\cellx1000\cellx2000 a\cell b\cell\row}", budget)
+                .unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_cells");
+    }
+
+    fn composite_list_source() -> &'static [u8] {
+        br"{\rtf1{\*\listtable{\list{\listlevel\levelnfc0\levelstartat1{\leveltext \'03\'00.\'00;}{\levelnumbers \'01\'03;}}\listid1}}{\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}}\pard\ls1\ilvl0 item\par}"
+    }
+
+    #[test]
+    fn rtf_generated_list_labels_charge_text_bytes() {
+        let budget = MaterializationBudget::with_limits(4096, 4, 10, 10);
+        let error = parse_with_budget(composite_list_source(), budget).unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_bytes");
+    }
+
+    #[test]
+    fn rtf_generated_list_labels_charge_text_runs() {
+        let budget = MaterializationBudget::with_limits(4096, 1024, 10, 1);
+        let error = parse_with_budget(composite_list_source(), budget).unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_runs");
+    }
+
+    #[test]
+    fn pending_text_limit_precedes_cell_limit() {
+        let budget = MaterializationBudget::with_limits(1024, 1, 0, 10);
+        let error =
+            parse_with_budget(br"{\rtf1\trowd\cellx1000 ab\cell\row}", budget).unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_bytes");
+    }
+}''',
+          )
+
+          Path(".github/workflows/agent-fix-review.yml").unlink(missing_ok=True)
+          Path(".github/workflows/agent-pr107-final-fixes.yml").unlink(missing_ok=True)
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Check formatting and whitespace
+        run: |
+          cargo fmt --all -- --check
+          git diff --check
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Commit verified fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && { echo "No changes to commit"; exit 1; }
+          git commit -m "fix: address remaining materialization review feedback"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
