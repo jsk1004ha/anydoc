@@ -1,7 +1,8 @@
 name: Agent apply anydoc review fixes
 
 on:
-  issues:
+  pull_request:
+    branches: [main]
     types: [opened]
 
 permissions:
@@ -10,7 +11,7 @@ permissions:
 
 jobs:
   apply-and-verify:
-    if: github.event.issue.title == 'agent: apply anydoc review fixes'
+    if: github.head_ref == 'agent/trigger-anydoc-main-runner'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -142,14 +143,14 @@ jobs:
       - name: Report success
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_SHA: ${{ steps.commit.outputs.sha }}
-        run: gh issue comment "$ISSUE_NUMBER" --body "SUCCESS: review fixes applied and verified. Commit: \`$COMMIT_SHA\`. Checks: rustfmt, cargo test --locked, clippy --all-targets with warnings denied."
+        run: gh pr comment "$PR_NUMBER" --body "SUCCESS: review fixes applied and verified. Commit: \`$COMMIT_SHA\`. Checks: rustfmt, cargo test --locked, clippy --all-targets with warnings denied."
 
       - name: Report failure
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: gh issue comment "$ISSUE_NUMBER" --body "FAILURE: the temporary review-fix workflow did not complete. Run: $RUN_URL"
+        run: gh pr comment "$PR_NUMBER" --body "FAILURE: the temporary review-fix workflow did not complete. Run: $RUN_URL"
