@@ -1,12 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  pull_request:
 
 permissions:
   contents: write
-  issues: write
+  pull-requests: write
 
 jobs:
   apply-and-verify:
@@ -23,8 +22,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Apply review fixes and regression tests
-        shell: python
         run: |
+          python - <<'PY'
           from pathlib import Path
 
           def replace_once(path: Path, old: str, new: str) -> None:
@@ -118,6 +117,7 @@ jobs:
     }
 }""",
           )
+          PY
 
       - name: Format
         run: cargo fmt --all
@@ -149,12 +149,14 @@ jobs:
       - name: Report success
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMIT_SHA: ${{ steps.commit.outputs.sha }}
-        run: gh issue comment 1 --body "SUCCESS: review fixes applied and verified. Commit: \`$COMMIT_SHA\`. Checks: rustfmt, cargo test --locked, clippy --workspace --all-targets --all-features with warnings denied."
+        run: gh pr comment "$PR_NUMBER" --body "SUCCESS: materialization review fixes applied and verified at \`$COMMIT_SHA\`. Checks: rustfmt, cargo test --locked, and Clippy across the workspace/all targets/all features with warnings denied."
 
       - name: Report failure
         if: failure()
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: gh issue comment 1 --body "FAILURE: the review-fix workflow did not complete. Run: $RUN_URL"
+        run: gh pr comment "$PR_NUMBER" --body "FAILURE: materialization review-fix verification did not complete. Run: $RUN_URL"
