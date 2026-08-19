@@ -1,0 +1,145 @@
+name: Temporary anydoc PR autofix validation
+
+on:
+  push:
+    branches:
+      - fix/bound-csv-rtf-materialization
+
+permissions:
+  contents: read
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply review fixes and regression tests
+        shell: python
+        run: |
+          from pathlib import Path
+
+          csv_path = Path("src/formats/csv.rs")
+          csv = csv_path.read_text(encoding="utf-8")
+          old_csv = "        let mut cells = Vec::with_capacity(record.len());"
+          assert csv.count(old_csv) == 1, "unexpected CSV allocation site"
+          csv = csv.replace(
+              old_csv,
+              "        // Do not reserve from an untrusted field count before the budget check.\n"
+              "        let mut cells = Vec::new();",
+              1,
+          )
+          csv_path.write_text(csv, encoding="utf-8")
+
+          rtf_path = Path("src/formats/rtf/mod.rs")
+          rtf = rtf_path.read_text(encoding="utf-8")
+
+          old_error_check = """            if let Some(error) = self.materialization_error.take() {
+                return Err(error);
+            }"""
+          assert rtf.count(old_error_check) == 2, "unexpected deferred-error checks"
+          rtf = rtf.replace(old_error_check, "            self.check_materialization_error()?;")
+
+          accepts_text = """    fn accepts_text(&self) -> bool {
+        self.state.capture != Capture::None || !self.state.suppress
+    }"""
+          assert rtf.count(accepts_text) == 1, "accepts_text anchor changed"
+          rtf = rtf.replace(
+              accepts_text,
+              """    fn check_materialization_error(&mut self) -> Result<(), ConvertError> {
+        match self.materialization_error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn accepts_text(&self) -> bool {
+        self.state.capture != Capture::None || !self.state.suppress
+    }""",
+              1,
+          )
+
+          paragraph_start = """    fn end_paragraph(&mut self) -> Result<(), ConvertError> {
+        let inlines = std::mem::take(&mut self.inlines);"""
+          assert rtf.count(paragraph_start) == 1, "end_paragraph anchor changed"
+          rtf = rtf.replace(
+              paragraph_start,
+              """    fn end_paragraph(&mut self) -> Result<(), ConvertError> {
+        self.check_materialization_error()?;
+        let inlines = std::mem::take(&mut self.inlines);""",
+              1,
+          )
+
+          list_entry = """        if let Some((key, level, number, label)) = entry {
+            self.list_run.push(ListEntry {"""
+          assert rtf.count(list_entry) == 1, "ordinary list-entry anchor changed"
+          rtf = rtf.replace(
+              list_entry,
+              """        if let Some((key, level, number, label)) = entry {
+            if let Some(label) = label.as_ref() {
+                self.budget.charge_text(label.len())?;
+                self.budget.charge_text_run()?;
+            }
+            self.list_run.push(ListEntry {""",
+              1,
+          )
+
+          cell_start = """    fn end_cell(&mut self, depth: usize) -> Result<(), ConvertError> {
+        self.budget.charge_cell()?;"""
+          assert rtf.count(cell_start) == 1, "end_cell anchor changed"
+          rtf = rtf.replace(
+              cell_start,
+              """    fn end_cell(&mut self, depth: usize) -> Result<(), ConvertError> {
+        self.check_materialization_error()?;
+        self.budget.charge_cell()?;""",
+              1,
+          )
+
+          tests = r'''
+
+    #[test]
+    fn rtf_list_label_materialization_is_bounded() {
+        let bytes = br"{\rtf1}";
+        let default_encoding = scan_codepage(bytes);
+        let prelude = parse_prelude(bytes, default_encoding);
+        let budget = MaterializationBudget::with_limits(1024, 3, 10, 10);
+        let mut parser = Parser::new(bytes, prelude, default_encoding, budget);
+        parser.state.ls = Some(1);
+        parser.dest.listtext = Some("label".into());
+        parser.inlines.push(Inline::plain("item"));
+
+        let error = parser.end_paragraph().unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_bytes");
+    }
+
+    #[test]
+    fn rtf_preserves_first_materialization_error_at_cell_boundary() {
+        let budget = MaterializationBudget::with_limits(1024, 1, 0, 10);
+        let error = parse_with_budget(br"{\rtf1\trowd\cellx1000 ab\cell\row}", budget)
+            .unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_bytes");
+    }
+'''
+          closing = rtf.rfind("\n}")
+          assert closing != -1, "test module closing brace missing"
+          rtf = rtf[:closing] + tests + rtf[closing:]
+          rtf_path.write_text(rtf, encoding="utf-8")
+
+      - name: Rust format
+        run: cargo fmt --check
+
+      - name: Rust test suite
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Upload patched files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-autofix-anydoc
+          path: |
+            src/formats/csv.rs
+            src/formats/rtf/mod.rs
+          if-no-files-found: error
