@@ -43,7 +43,7 @@ fn parse_with_budget(
                 continue;
             }
         };
-        let mut cells = Vec::with_capacity(record.len());
+        let mut cells = Vec::new();
         for field in &record {
             budget.charge_cell()?;
             budget.charge_text(field.len())?;
