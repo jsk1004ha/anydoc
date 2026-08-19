@@ -911,6 +911,9 @@ impl<'a> Parser<'a> {
     }
 
     fn end_paragraph(&mut self) -> Result<(), ConvertError> {
+        if let Some(error) = self.materialization_error.take() {
+            return Err(error);
+        }
         let inlines = std::mem::take(&mut self.inlines);
         let listtext = self.dest.listtext.take();
 
@@ -953,6 +956,12 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         if let Some((key, level, number, label)) = entry {
+            if key.marker.ordered()
+                && let Some(label) = label.as_ref()
+            {
+                self.budget.charge_text(label.len())?;
+                self.budget.charge_text_run()?;
+            }
             self.list_run.push(ListEntry {
                 level,
                 key,
@@ -1033,6 +1042,9 @@ impl<'a> Parser<'a> {
     }
 
     fn end_cell(&mut self, depth: usize) -> Result<(), ConvertError> {
+        if let Some(error) = self.materialization_error.take() {
+            return Err(error);
+        }
         self.budget.charge_cell()?;
         let inlines = std::mem::take(&mut self.inlines);
         self.dest.listtext = None;
@@ -1185,5 +1197,23 @@ mod tests {
             parse_with_budget(br"{\rtf1\trowd\cellx1000\cellx2000 a\cell b\cell\row}", budget)
                 .unwrap_err();
         assert_eq!(rtf_resource_limit_name(error), "max_materialized_cells");
+    }
+
+    #[test]
+    fn rtf_generated_list_labels_are_bounded() {
+        let budget = MaterializationBudget::with_limits(4096, 4, 10, 10);
+        let error = parse_with_budget(
+            br"{\rtf1{\*\listtable{\list{\listlevel\levelnfc0\levelstartat1{\leveltext \'03\'00.\'00;}{\levelnumbers \'01\'03;}}\listid1}}{\listoverridetable{\listoverride\listid1\listoverridecount0\ls1}}\pard\ls1\ilvl0 item\par}",
+            budget,
+        )
+        .unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_bytes");
+    }
+
+    #[test]
+    fn pending_text_limit_precedes_cell_limit() {
+        let budget = MaterializationBudget::with_limits(1024, 1, 0, 10);
+        let error = parse_with_budget(br"{\rtf1\trowd\cellx1000 ab\cell\row}", budget).unwrap_err();
+        assert_eq!(rtf_resource_limit_name(error), "max_materialized_text_bytes");
     }
 }
